@@ -3,5 +3,8 @@
     "camera"
   ],
   "name": "Eco Pro 3D Tool ",
-  "description": ""
+  "description": "3D interactive smart city and renewable energy grid simulation with dynamic atmospheric day/night cycle, real-time lighting, and computational urban planning tools.",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

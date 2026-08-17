@@ -4,7 +4,7 @@
 */
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Canvas, useFrame, useThree, ThreeEvent } from '@react-three/fiber';
-import { OrbitControls, Environment, Instances, Instance, BakeShadows, PerspectiveCamera } from '@react-three/drei';
+import { OrbitControls, Instances, Instance, PerspectiveCamera, Sky, Stars } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette, ToneMapping } from '@react-three/postprocessing';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
@@ -12,6 +12,10 @@ import { COLORS, SCENE_SIZE, TURBINE_COUNT, SOLAR_COUNT, SIM_CONFIG, BUILDINGS }
 import { AppMode, EditorTool, EnergyStation, GestureState, SceneData, SimulationMetrics, BuildingData, BuildingType } from '../types';
 import { HandControlSystem } from './HandControlSystem';
 import { PlannerUI } from './PlannerUI';
+import { WaterBasin } from './WaterBasin';
+import { DioramaBase } from './DioramaBase';
+import { TransitNetwork } from './TransitNetwork';
+import { CameraDock, CameraPreset } from './CameraDock';
 
 // --- Shaders & Materials ---
 
@@ -80,37 +84,32 @@ const EnergyFlowMaterial = {
     varying vec2 vUv;
     
     void main() {
-      // Create distinct "packets" of energy traveling down the line
-      float segments = 3.0; // Number of concurrent pulses
-      float travel = vUv.x * segments - time * speed * 3.0;
-      
-      // The "Sawtooth" wave for the pulse (0.0 to 1.0)
+      // Primary energy stream pulses
+      float segments = 3.0;
+      float travel = vUv.x * segments - time * speed * 3.5;
       float pulseShape = fract(travel);
+      float intensity = pow(pulseShape, 8.0); 
       
-      // Shape it into a bolt: Sharp head (near 1.0), long tail (towards 0.0)
-      float intensity = pow(pulseShape, 12.0); 
+      // Secondary micro-pulses
+      float travel2 = vUv.x * 6.0 - time * speed * 4.5;
+      float pulse2 = pow(fract(travel2), 12.0) * 0.6;
+      intensity += pulse2;
       
-      // Add a subtle secondary shimmer layer
-      float shimmer = sin(vUv.x * 30.0 - time * 10.0) * 0.5 + 0.5;
-      intensity += shimmer * 0.05;
+      // High-frequency energy shimmer
+      float shimmer = sin(vUv.x * 50.0 - time * 12.0) * 0.5 + 0.5;
+      intensity += shimmer * 0.08;
 
-      // Base visibility so the line is never fully invisible
-      float baseGlow = 0.1;
+      // Base idle flow
+      float baseGlow = 0.15;
       
-      // Calculate final alpha
       float alpha = (baseGlow + intensity) * opacity;
+      alpha *= smoothstep(0.0, 0.08, vUv.x) * smoothstep(1.0, 0.85, vUv.x);
       
-      // Soft fade at start and end of the tube
-      alpha *= smoothstep(0.0, 0.1, vUv.x) * smoothstep(1.0, 0.8, vUv.x);
-      
-      // Color Logic: Mix base color with white at high intensity
-      vec3 finalColor = mix(color, vec3(1.0), intensity * 0.7);
-      
-      // Bloom Boost: Multiply color values > 1.0 for HDR glow
-      finalColor *= (1.2 + intensity * 8.0);
+      // High-energy white core with colored corona
+      vec3 finalColor = mix(color, vec3(1.0, 1.0, 1.0), intensity * 0.85);
+      finalColor *= (1.4 + intensity * 9.0);
       
       if (alpha < 0.01) discard;
-      
       gl_FragColor = vec4(finalColor, alpha);
     }
   `
@@ -411,12 +410,11 @@ const Terrain = ({ editorMode, onPlace }: { editorMode: boolean, onPlace: (p: TH
   );
 };
 
-// Enhanced City Building Component with Types
-const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({ type, position, scale, rotation, variant, onClick }) => {
+/// Enhanced City Building Component with Types
+// Enhanced City Building Component with Rich Rooftop & Architectural Details
+const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void; nightFactor?: number }> = ({ type, position, scale, rotation, variant, onClick, nightFactor = 0 }) => {
   const [w, h, d] = scale;
   
-  const isNature = type === BuildingType.Forest || type === BuildingType.Mountain;
-
   const Foundation = () => (
       <mesh position={[0, 0.2, 0]}>
           <boxGeometry args={[w + 1, 0.4, d + 1]} />
@@ -428,11 +426,16 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
   if (type === BuildingType.Residential) {
       const style = variant % 3;
 
-      // Common: Warm light for homes
       const WindowBand: React.FC<{ y: number }> = ({ y }) => (
           <mesh position={[0, y, 0]}>
-              <boxGeometry args={[w + 0.1, 1.5, d + 0.1]} />
-              <meshStandardMaterial color={COLORS.cityEmissive} emissive="#f59e0b" emissiveIntensity={1.0} transparent opacity={0.6} />
+              <boxGeometry args={[w + 0.1, 1.4, d + 0.1]} />
+              <meshStandardMaterial 
+                color={COLORS.cityEmissive} 
+                emissive="#f59e0b" 
+                emissiveIntensity={0.8 + nightFactor * 2.4} 
+                transparent 
+                opacity={0.75} 
+              />
           </mesh>
       );
 
@@ -440,35 +443,62 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
           <group position={position} rotation={rotation} onClick={onClick}>
               <Foundation />
               
-              {/* V0: The Eco-Pod (Modern, Flat, Balconies) */}
+              {/* V0: The Eco-Pod (Rooftop solar canopy & botanical terrace) */}
               {style === 0 && (
                   <>
                       <mesh position={[0, h/2, 0]} castShadow receiveShadow>
                           <boxGeometry args={[w, h, d]} />
-                          <meshStandardMaterial color="#f1f5f9" />
+                          <meshStandardMaterial color="#f1f5f9" roughness={0.4} />
                       </mesh>
                       {/* Staggered Windows */}
                       {Array.from({ length: Math.floor(h/4) }).map((_, i) => (
                            <WindowBand key={i} y={(i * 4) + 2} />
                       ))}
-                      {/* Rooftop Garden */}
+                      {/* Rooftop Garden Base */}
                       <mesh position={[0, h + 0.2, 0]}>
-                           <boxGeometry args={[w * 0.9, 0.4, d * 0.9]} />
-                           <meshStandardMaterial color="#4ade80" />
+                           <boxGeometry args={[w * 0.92, 0.4, d * 0.92]} />
+                           <meshStandardMaterial color="#15803d" />
                       </mesh>
-                      <mesh position={[1, h + 1, 1]}>
-                           <dodecahedronGeometry args={[1]} />
-                           <meshStandardMaterial color="#166534" />
+                      {/* Rooftop Shrubs */}
+                      <mesh position={[-w * 0.25, h + 0.9, -d * 0.25]}>
+                           <dodecahedronGeometry args={[0.9]} />
+                           <meshStandardMaterial color="#16a34a" />
                       </mesh>
+                      <mesh position={[w * 0.25, h + 0.8, -d * 0.2]}>
+                           <dodecahedronGeometry args={[0.7]} />
+                           <meshStandardMaterial color="#22c55e" />
+                      </mesh>
+                      {/* Tilted Rooftop Photovoltaic Canopy */}
+                      <group position={[0, h + 1.6, d * 0.15]} rotation={[0.2, 0, 0]}>
+                          <mesh castShadow>
+                              <boxGeometry args={[w * 0.75, 0.12, d * 0.45]} />
+                              <meshPhysicalMaterial 
+                                color="#0f172a" 
+                                roughness={0.1} 
+                                metalness={0.9} 
+                                emissive="#0284c7" 
+                                emissiveIntensity={0.2 + nightFactor * 0.4}
+                              />
+                          </mesh>
+                          {/* Metal Mounting Struts */}
+                          <mesh position={[-w * 0.3, -0.6, 0]}>
+                              <cylinderGeometry args={[0.06, 0.06, 1.2]} />
+                              <meshStandardMaterial color="#94a3b8" metalness={0.8} />
+                          </mesh>
+                          <mesh position={[w * 0.3, -0.6, 0]}>
+                              <cylinderGeometry args={[0.06, 0.06, 1.2]} />
+                              <meshStandardMaterial color="#94a3b8" metalness={0.8} />
+                          </mesh>
+                      </group>
                   </>
               )}
 
-              {/* V1: The Solar A-Frame (Classic shape, High Tech Roof) */}
+              {/* V1: The Solar A-Frame (High Tech Solar Shingle Roof & Micro HVAC) */}
               {style === 1 && (
                   <>
                        <mesh position={[0, h/2, 0]} castShadow receiveShadow>
                           <boxGeometry args={[w, h, d]} />
-                          <meshStandardMaterial color="#fff7ed" />
+                          <meshStandardMaterial color="#fff7ed" roughness={0.4} />
                       </mesh>
                       {Array.from({ length: Math.floor(h/3) }).map((_, i) => (
                           <mesh key={i} position={[0, i*3 + 1.5, 0]}>
@@ -476,15 +506,26 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                               <meshStandardMaterial color="#334155" />
                           </mesh>
                       ))}
-                      {/* Solar Roof */}
-                      <mesh position={[0, h + 1.5, 0]} rotation={[0, Math.PI/4, 0]}>
-                           <coneGeometry args={[w*0.8, 3, 4]} />
-                           <meshPhysicalMaterial color="#1e3a8a" roughness={0.2} metalness={0.8} />
+                      {/* Monocrystalline Solar Roof */}
+                      <mesh position={[0, h + 1.6, 0]} rotation={[0, Math.PI/4, 0]}>
+                           <coneGeometry args={[w*0.82, 3.2, 4]} />
+                           <meshPhysicalMaterial 
+                                color="#1e3a8a" 
+                                roughness={0.15} 
+                                metalness={0.85} 
+                                emissive="#38bdf8" 
+                                emissiveIntensity={0.25 + nightFactor * 0.5} 
+                           />
+                      </mesh>
+                      {/* Rooftop Micro-HVAC Fan Box */}
+                      <mesh position={[w * 0.28, h + 0.6, d * 0.28]} castShadow>
+                          <boxGeometry args={[1.2, 0.9, 1.2]} />
+                          <meshStandardMaterial color="#64748b" metalness={0.6} />
                       </mesh>
                   </>
               )}
 
-               {/* V2: The Vertical Garden (Stacked, Greenery heavy) */}
+               {/* V2: The Vertical Garden (Cascading Green Terraces & Solarium Dome) */}
                {style === 2 && (
                   <>
                        {Array.from({ length: Math.floor(h/3) }).map((_, i) => (
@@ -493,18 +534,30 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                                   <boxGeometry args={[w - (i*0.5), 2.8, d - (i*0.5)]} />
                                   <meshStandardMaterial color="#e2e8f0" />
                               </mesh>
-                              {/* Green Ledge */}
+                              {/* Green Planter Ledge */}
                               <mesh position={[0, 1.4, 0]}>
-                                  <boxGeometry args={[w - (i*0.5) + 0.5, 0.4, d - (i*0.5) + 0.5]} />
-                                  <meshStandardMaterial color="#22c55e" />
+                                  <boxGeometry args={[w - (i*0.5) + 0.6, 0.4, d - (i*0.5) + 0.6]} />
+                                  <meshStandardMaterial color={i % 2 === 0 ? "#16a34a" : "#22c55e"} />
                               </mesh>
                               {/* Warm Window */}
-                              <mesh position={[0, 0, d/2]}>
-                                  <planeGeometry args={[2, 2]} />
-                                  <meshStandardMaterial color="#fbbf24" emissive="#fbbf24" emissiveIntensity={0.8} />
+                              <mesh position={[0, 0, d/2 - (i*0.25)]}>
+                                  <planeGeometry args={[2.2, 1.8]} />
+                                  <meshStandardMaterial color="#fbbf24" emissive="#fbbf24" emissiveIntensity={0.8 + nightFactor * 2.2} />
                               </mesh>
                           </group>
                       ))}
+                      {/* Rooftop Glass Solarium Dome */}
+                      <mesh position={[0, h + 0.8, 0]}>
+                          <sphereGeometry args={[1.5, 12, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
+                          <meshPhysicalMaterial 
+                            color="#e0f2fe" 
+                            transmission={0.4} 
+                            roughness={0.1} 
+                            metalness={0.2} 
+                            emissive="#fef08a" 
+                            emissiveIntensity={0.4 + nightFactor * 1.8}
+                          />
+                      </mesh>
                   </>
               )}
           </group>
@@ -515,22 +568,21 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
   if (type === BuildingType.Commercial) {
       const style = variant % 3;
 
-      // Common: Cool light for offices
       const GlassMat = <meshPhysicalMaterial 
             color="#e0f2fe" 
-            transmission={0.2} 
-            opacity={0.9}
-            metalness={0.5} 
+            transmission={0.25} 
+            opacity={0.9} 
+            metalness={0.6} 
             roughness={0.1} 
             emissive="#0ea5e9"
-            emissiveIntensity={0.3}
+            emissiveIntensity={0.25 + nightFactor * 1.8}
       />;
 
       return (
         <group position={position} rotation={rotation} onClick={onClick}>
           <Foundation />
           
-          {/* V0: Crystalline Spire (Glass monolith) */}
+          {/* V0: Crystalline Spire (Glass monolith with observation deck & beacon mast) */}
           {style === 0 && (
               <>
                 <mesh position={[0, h/2, 0]} castShadow receiveShadow>
@@ -549,21 +601,36 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                         <meshStandardMaterial color="#cbd5e1" metalness={0.8} />
                     </mesh>
                 ))}
-                {/* Antenna */}
-                <mesh position={[0, h + 3, 0]}>
-                    <cylinderGeometry args={[0.1, 0.5, 6]} />
-                    <meshStandardMaterial color="#94a3b8" emissive="#f43f5e" emissiveIntensity={2} />
+                {/* Rooftop Skydeck */}
+                <mesh position={[0, h + 0.2, 0]}>
+                    <boxGeometry args={[w * 0.9, 0.4, d * 0.9]} />
+                    <meshStandardMaterial color="#334155" metalness={0.8} />
+                </mesh>
+                {/* Antenna Mast */}
+                <mesh position={[0, h + 3.5, 0]}>
+                    <cylinderGeometry args={[0.1, 0.4, 7, 8]} />
+                    <meshStandardMaterial color="#94a3b8" metalness={0.9} />
+                </mesh>
+                {/* Flashing Red Aviation Beacon Tip */}
+                <mesh position={[0, h + 7.2, 0]}>
+                    <sphereGeometry args={[0.4, 8, 8]} />
+                    <meshStandardMaterial 
+                        color="#f43f5e" 
+                        emissive="#f43f5e" 
+                        emissiveIntensity={3.0 + nightFactor * 2.5} 
+                        toneMapped={false} 
+                    />
                 </mesh>
               </>
           )}
 
-          {/* V1: Tiered Bio-Tower (Setbacks with green roofs) */}
+          {/* V1: Tiered Bio-Tower (Stepped sky terraces with canopy trees) */}
           {style === 1 && (
               <>
                   {/* Base */}
                   <mesh position={[0, h * 0.25, 0]} castShadow receiveShadow>
                       <boxGeometry args={[w, h * 0.5, d]} />
-                      <meshStandardMaterial color="#f8fafc" />
+                      <meshStandardMaterial color="#f8fafc" roughness={0.3} />
                   </mesh>
                   {/* Mid */}
                   <mesh position={[0, h * 0.65, 0]} castShadow receiveShadow>
@@ -577,28 +644,37 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                   </mesh>
                   {/* Green Terraces */}
                   <mesh position={[0, h * 0.5 + 0.1, 0]}>
-                       <boxGeometry args={[w, 0.2, d]} />
+                       <boxGeometry args={[w + 0.1, 0.2, d + 0.1]} />
                        <meshStandardMaterial color="#16a34a" />
                   </mesh>
+                  <mesh position={[w * 0.35, h * 0.5 + 0.8, d * 0.35]}>
+                       <dodecahedronGeometry args={[0.8]} />
+                       <meshStandardMaterial color="#15803d" />
+                  </mesh>
                   <mesh position={[0, h * 0.8 + 0.1, 0]}>
-                       <boxGeometry args={[w * 0.75, 0.2, d * 0.75]} />
+                       <boxGeometry args={[w * 0.75 + 0.1, 0.2, d * 0.75 + 0.1]} />
                        <meshStandardMaterial color="#16a34a" />
+                  </mesh>
+                  {/* Rooftop Solar Pergola */}
+                  <mesh position={[0, h + 0.6, 0]}>
+                       <boxGeometry args={[w * 0.45, 0.1, d * 0.45]} />
+                       <meshPhysicalMaterial color="#0284c7" transmission={0.5} roughness={0.1} emissive="#0284c7" emissiveIntensity={0.5} />
                   </mesh>
               </>
           )}
 
-          {/* V2: Exoskeleton Hub (Tech/Data Center look) */}
+          {/* V2: Exoskeleton Hub (Tech center with illuminated Drone Helipad) */}
           {style === 2 && (
               <>
                    <mesh position={[0, h/2, 0]} castShadow receiveShadow>
                         <boxGeometry args={[w * 0.9, h, d * 0.9]} />
-                        <meshStandardMaterial color="#1e293b" />
+                        <meshStandardMaterial color="#1e293b" roughness={0.5} />
                    </mesh>
                    {/* Cyber Lines */}
                    {Array.from({ length: 4 }).map((_, i) => (
                         <mesh key={i} position={[(i%2===0?1:-1)*w/2, h/2, (i<2?1:-1)*d/2]}>
                              <boxGeometry args={[0.5, h, 0.5]} />
-                             <meshStandardMaterial color="#94a3b8" />
+                             <meshStandardMaterial color="#94a3b8" metalness={0.8} />
                         </mesh>
                    ))}
                    {/* Horizontal Cross Bracing */}
@@ -606,10 +682,35 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                        <group key={i} position={[0, i*6 + 3, 0]}>
                             <mesh>
                                 <boxGeometry args={[w+0.2, 0.3, d+0.2]} />
-                                <meshStandardMaterial color="#0ea5e9" emissive="#0ea5e9" emissiveIntensity={0.8} />
+                                <meshStandardMaterial color="#0ea5e9" emissive="#0ea5e9" emissiveIntensity={0.6 + nightFactor * 2.0} />
                             </mesh>
                        </group>
                    ))}
+                   {/* Rooftop Drone Landing Helipad */}
+                   <group position={[0, h + 0.1, 0]}>
+                       <mesh receiveShadow>
+                           <cylinderGeometry args={[w * 0.42, w * 0.44, 0.3, 24]} />
+                           <meshStandardMaterial color="#0f172a" roughness={0.7} />
+                       </mesh>
+                       {/* Illuminated Helipad Target Ring */}
+                       <mesh position={[0, 0.16, 0]} rotation={[-Math.PI/2, 0, 0]}>
+                           <ringGeometry args={[w * 0.28, w * 0.34, 24]} />
+                           <meshBasicMaterial color="#38bdf8" />
+                       </mesh>
+                       {/* Helipad 'H' Indicator Bar 1 */}
+                       <mesh position={[-w * 0.1, 0.17, 0]} rotation={[-Math.PI/2, 0, 0]}>
+                           <planeGeometry args={[0.3, w * 0.3]} />
+                           <meshBasicMaterial color="#fbbf24" />
+                       </mesh>
+                       <mesh position={[w * 0.1, 0.17, 0]} rotation={[-Math.PI/2, 0, 0]}>
+                           <planeGeometry args={[0.3, w * 0.3]} />
+                           <meshBasicMaterial color="#fbbf24" />
+                       </mesh>
+                       <mesh position={[0, 0.17, 0]} rotation={[-Math.PI/2, 0, 0]}>
+                           <planeGeometry args={[w * 0.2, 0.3]} />
+                           <meshBasicMaterial color="#fbbf24" />
+                       </mesh>
+                   </group>
               </>
           )}
 
@@ -646,12 +747,10 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
   if (type === BuildingType.Road) {
       return (
           <group position={position} rotation={rotation} onClick={onClick}>
-               {/* Asphalt - Lifted slightly to 0.1 and thickened to 0.2 to prevent z-fighting with terrain */}
                <mesh position={[0, 0.1, 0]} receiveShadow>
                    <boxGeometry args={[12, 0.2, 12]} />
                    <meshStandardMaterial color="#1e293b" roughness={0.9} />
                </mesh>
-               {/* Sidewalks - Lifted to match */}
                <mesh position={[-5.5, 0.2, 0]}>
                    <boxGeometry args={[1, 0.3, 12]} />
                    <meshStandardMaterial color="#cbd5e1" />
@@ -660,7 +759,6 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                    <boxGeometry args={[1, 0.3, 12]} />
                    <meshStandardMaterial color="#cbd5e1" />
                </mesh>
-               {/* Center Markings (Dashed Yellow) */}
                <mesh position={[0, 0.21, 0]} rotation={[-Math.PI/2, 0, 0]}>
                    <planeGeometry args={[0.5, 8]} />
                    <meshBasicMaterial color="#fcd34d" transparent opacity={0.8} />
@@ -676,10 +774,9 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                       <boxGeometry args={[1.5, 0.1, 0.4]} />
                       <meshStandardMaterial color="#64748b" />
                   </mesh>
-                  {/* Glowing Solar Light */}
                   <mesh position={[-1, 3.8, 0]}>
                       <boxGeometry args={[0.5, 0.1, 0.3]} />
-                      <meshStandardMaterial color="#fbbf24" emissive="#fbbf24" emissiveIntensity={2} />
+                      <meshStandardMaterial color="#fbbf24" emissive="#fbbf24" emissiveIntensity={1.2 + nightFactor * 3.5} />
                   </mesh>
                </group>
           </group>
@@ -688,13 +785,12 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
   
   // -- FOREST (Procedural Grove) --
   if (type === BuildingType.Forest) {
-      // Deterministic layout based on position
       const seed = Math.abs(Math.sin(position[0] * 12.9898 + position[2] * 78.233));
-      const treeCount = 5 + Math.floor(seed * 4); // 5-8 trees
+      const treeCount = 5 + Math.floor(seed * 4);
       const trees = Array.from({length: treeCount}).map((_, i) => {
           const tSeed = (seed * (i + 1)) % 1;
           return {
-              x: (tSeed - 0.5) * 8, // Spread within 10x10 area
+              x: (tSeed - 0.5) * 8,
               z: ((tSeed * 10) % 1 - 0.5) * 8,
               scale: 0.8 + (tSeed * 0.8),
               type: tSeed > 0.6 ? 'oak' : 'pine',
@@ -708,12 +804,10 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                  <group key={i} position={[t.x, 0, t.z]} rotation={[0, t.rot, 0]} scale={t.scale}>
                     {t.type === 'pine' ? (
                          <>
-                            {/* Pine Trunk */}
                             <mesh position={[0, 0.5, 0]}>
                                 <cylinderGeometry args={[0.2, 0.3, 1, 6]} />
                                 <meshStandardMaterial color="#3f2c20" roughness={1} />
                             </mesh>
-                            {/* Pine Foliage - Low Poly Stack */}
                             <mesh position={[0, 2.0, 0]} castShadow receiveShadow>
                                 <coneGeometry args={[1.5, 3, 5]} />
                                 <meshStandardMaterial color="#14532d" flatShading roughness={0.9} />
@@ -725,12 +819,10 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
                          </>
                     ) : (
                          <>
-                            {/* Oak Trunk */}
                             <mesh position={[0, 0.4, 0]}>
                                 <cylinderGeometry args={[0.3, 0.4, 0.8, 6]} />
                                 <meshStandardMaterial color="#3f2c20" roughness={1} />
                             </mesh>
-                            {/* Oak Foliage */}
                             <mesh position={[0, 1.8, 0]} castShadow receiveShadow>
                                 <dodecahedronGeometry args={[1.3]} />
                                 <meshStandardMaterial color="#4ade80" flatShading roughness={0.9} />
@@ -745,31 +837,23 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
 
   // -- MOUNTAIN (Procedural Peak) --
   if (type === BuildingType.Mountain) {
-      // Use dimensions to create a main peak and sub-peaks
-      const baseW = w * 0.5; // Radius
+      const baseW = w * 0.5;
       const height = h;
       
       return (
           <group position={position} onClick={onClick}>
-              {/* Main Peak - 4 Sided Pyramid Style */}
               <mesh position={[0, height * 0.4, 0]} castShadow receiveShadow>
                   <cylinderGeometry args={[0, baseW, height * 0.8, 4, 1]} />
                   <meshStandardMaterial color="#475569" flatShading roughness={0.9} />
               </mesh>
-              
-              {/* Snow Cap */}
               <mesh position={[0, height * 0.65, 0]} rotation={[0, 0.1, 0]}>
                   <cylinderGeometry args={[0, baseW * 0.35, height * 0.3, 4, 1]} />
                   <meshStandardMaterial color="#f8fafc" flatShading roughness={0.1} />
               </mesh>
-
-              {/* Sub Peak 1 */}
               <mesh position={[baseW * 0.6, height * 0.2, baseW * 0.2]} rotation={[0.2, 0.5, 0.1]} castShadow receiveShadow>
                   <cylinderGeometry args={[0, baseW * 0.5, height * 0.5, 4, 1]} />
                   <meshStandardMaterial color="#334155" flatShading roughness={0.9} />
               </mesh>
-
-              {/* Sub Peak 2 */}
               <mesh position={[-baseW * 0.5, height * 0.15, -baseW * 0.3]} rotation={[-0.2, 1.2, -0.1]} castShadow receiveShadow>
                   <cylinderGeometry args={[0, baseW * 0.4, height * 0.4, 4, 1]} />
                   <meshStandardMaterial color="#334155" flatShading roughness={0.9} />
@@ -778,42 +862,74 @@ const CityBuilding: React.FC<BuildingData & { onClick?: (e: any) => void }> = ({
       )
   }
 
-  // Fallback
   return null;
-}
+};
 
+// High-Tech Wind Turbine with Strobe Warning Beacon & Rotor Trail
 const SingleTurbine = ({ position, scale, rotation, pulseIntensity }: any) => {
   const blades = useRef<THREE.Group>(null);
+  const beaconRef = useRef<THREE.MeshStandardMaterial>(null);
+
   useFrame((state, delta) => {
     if (blades.current) {
         const speed = 0.5 + (pulseIntensity * 8.0); 
         blades.current.rotation.z -= speed * delta;
     }
+    if (beaconRef.current) {
+        // Synchronized aviation flash
+        const flash = (Math.sin(state.clock.elapsedTime * 6.0) > 0.4) ? 3.5 : 0.2;
+        beaconRef.current.emissiveIntensity = flash;
+    }
   });
 
   return (
     <group position={position} scale={scale} rotation={rotation}>
+      {/* Foundation Concrete Pad */}
       <mesh position={[0, 0.5, 0]} receiveShadow>
-          <cylinderGeometry args={[0.7, 0.9, 1.2, 8]} />
-          <meshStandardMaterial color="#94a3b8" roughness={0.8} />
+          <cylinderGeometry args={[0.9, 1.1, 1.2, 8]} />
+          <meshStandardMaterial color="#64748b" roughness={0.8} />
       </mesh>
+      {/* Base Power Inverter / Transformer Box */}
+      <mesh position={[0.7, 0.8, 0]} castShadow>
+          <boxGeometry args={[0.6, 0.8, 0.6]} />
+          <meshStandardMaterial color="#1e293b" />
+      </mesh>
+      <mesh position={[0.7, 1.25, 0]}>
+          <boxGeometry args={[0.15, 0.15, 0.15]} />
+          <meshBasicMaterial color={COLORS.windGlow} />
+      </mesh>
+      {/* Slender Aerodynamic Tower */}
       <mesh position={[0, 9, 0]} castShadow receiveShadow>
         <cylinderGeometry args={[0.2, 0.5, 18, 12]} />
-        <meshStandardMaterial color="#f8fafc" roughness={0.3} />
+        <meshStandardMaterial color="#f8fafc" roughness={0.3} metalness={0.2} />
       </mesh>
+      {/* Nacelle & Rotor Assembly */}
       <group position={[0, 18, 0]}>
          <mesh position={[0, 0, -0.6]} castShadow>
             <boxGeometry args={[0.7, 0.8, 2]} />
-            <meshStandardMaterial color="#ffffff" roughness={0.2} />
+            <meshStandardMaterial color="#ffffff" roughness={0.2} metalness={0.4} />
          </mesh>
+         {/* Aviation Strobe Beacon on top of nacelle */}
+         <mesh position={[0, 0.5, -0.5]}>
+             <sphereGeometry args={[0.18, 8, 8]} />
+             <meshStandardMaterial 
+                ref={beaconRef}
+                color="#f43f5e" 
+                emissive="#f43f5e" 
+                emissiveIntensity={2.0} 
+                toneMapped={false}
+             />
+         </mesh>
+         {/* Luminous Intake Ring */}
          <mesh position={[0, 0, 0.4]} rotation={[Math.PI/2, 0, 0]}>
              <torusGeometry args={[0.3, 0.05, 8, 16]} />
              <meshStandardMaterial 
                 color={COLORS.wind} 
                 emissive={COLORS.windGlow} 
-                emissiveIntensity={0.5 + pulseIntensity * 3} 
+                emissiveIntensity={0.6 + pulseIntensity * 3} 
              />
          </mesh>
+         {/* Rotor Blades */}
          <group ref={blades} position={[0, 0, 0.5]}>
             <mesh rotation={[Math.PI/2, 0, 0]}>
                  <sphereGeometry args={[0.45, 16, 16]} />
@@ -822,11 +938,12 @@ const SingleTurbine = ({ position, scale, rotation, pulseIntensity }: any) => {
             {[0, 1, 2].map((k) => (
                 <group key={k} rotation={[0, 0, (k * Math.PI * 2) / 3]}>
                     <mesh position={[0, 4.2, 0]}>
-                        <boxGeometry args={[0.4, 9, 0.15]} />
-                        <meshStandardMaterial color="#ffffff" />
+                        <boxGeometry args={[0.35, 9, 0.12]} />
+                        <meshStandardMaterial color="#ffffff" metalness={0.3} />
                     </mesh>
-                    <mesh position={[0, 7.5, 0.08]}>
-                         <planeGeometry args={[0.1, 2]} />
+                    {/* Glowing Wingtip Fin */}
+                    <mesh position={[0, 7.8, 0.06]}>
+                         <planeGeometry args={[0.12, 1.8]} />
                          <meshBasicMaterial color={COLORS.windGlow} side={THREE.DoubleSide} toneMapped={false} />
                     </mesh>
                 </group>
@@ -835,17 +952,215 @@ const SingleTurbine = ({ position, scale, rotation, pulseIntensity }: any) => {
       </group>
     </group>
   )
-}
+};
 
-const EnergyStreams = ({ stations, target, speedMultiplier, color }: { stations: EnergyStation[], target: THREE.Vector3, speedMultiplier: number, color: string }) => {
+// Centerpiece Solarpunk Energy Spire with Kinetic Gyro Rings, Floating Plasma Core & Apex Beacon
+const CentralSpire: React.FC<{ nightFactor: number; gridEfficiency?: number }> = ({ nightFactor, gridEfficiency = 1.0 }) => {
+    const ring1Ref = useRef<THREE.Group>(null);
+    const ring2Ref = useRef<THREE.Group>(null);
+    const ring3Ref = useRef<THREE.Group>(null);
+    const coreRef = useRef<THREE.Mesh>(null);
+    const shieldRef = useRef<THREE.Mesh>(null);
+    const waveRing1 = useRef<THREE.Mesh>(null);
+    const waveRing2 = useRef<THREE.Mesh>(null);
+
+    useFrame((state, delta) => {
+        const time = state.clock.getElapsedTime();
+
+        // 3-Axis Concentric Gyro Gimbal Rotations
+        if (ring1Ref.current) ring1Ref.current.rotation.x += delta * 1.1;
+        if (ring2Ref.current) ring2Ref.current.rotation.y += delta * 1.6;
+        if (ring3Ref.current) ring3Ref.current.rotation.z += delta * 0.85;
+
+        // Breathing Plasma Core
+        if (coreRef.current) {
+            const scale = 1.0 + Math.sin(time * 3.5) * 0.15;
+            coreRef.current.scale.set(scale, scale, scale);
+            coreRef.current.rotation.y += delta * 0.5;
+        }
+
+        // Translucent Energy Containment Shield rotation
+        if (shieldRef.current) {
+            shieldRef.current.rotation.y -= delta * 0.3;
+            shieldRef.current.rotation.x = Math.sin(time * 0.5) * 0.15;
+        }
+
+        // Ascending Energy Wave Pulses
+        if (waveRing1.current) {
+            const y1 = ((time * 18) % 65) + 5;
+            waveRing1.current.position.y = y1;
+            const op1 = Math.sin((y1 / 65) * Math.PI);
+            waveRing1.current.scale.set(1 + op1 * 0.5, 1, 1 + op1 * 0.5);
+        }
+        if (waveRing2.current) {
+            const y2 = (((time * 18) + 32.5) % 65) + 5;
+            waveRing2.current.position.y = y2;
+            const op2 = Math.sin((y2 / 65) * Math.PI);
+            waveRing2.current.scale.set(1 + op2 * 0.5, 1, 1 + op2 * 0.5);
+        }
+    });
+
+    return (
+        <group position={[0, 0, 0]}>
+            {/* Ground Podium & Energy Conduits */}
+            <mesh position={[0, 0.4, 0]} receiveShadow>
+                <cylinderGeometry args={[14, 16, 0.8, 12]} />
+                <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.3} />
+            </mesh>
+            <mesh position={[0, 0.85, 0]}>
+                <ringGeometry args={[8, 12, 24]} />
+                <meshBasicMaterial color="#38bdf8" transparent opacity={0.6 + nightFactor * 0.4} />
+            </mesh>
+
+            {/* Stepped Base Spire Structure */}
+            <mesh position={[0, 15, 0]} castShadow receiveShadow>
+                <cylinderGeometry args={[2.0, 5.5, 30, 8]} />
+                <meshStandardMaterial 
+                    color="#f8fafc" 
+                    metalness={0.4} 
+                    roughness={0.2} 
+                />
+            </mesh>
+            {/* Vertical Conduit Light Guides */}
+            {Array.from({ length: 4 }).map((_, i) => (
+                <mesh key={i} position={[Math.cos(i * Math.PI / 2) * 3.6, 15, Math.sin(i * Math.PI / 2) * 3.6]}>
+                    <boxGeometry args={[0.25, 28, 0.25]} />
+                    <meshBasicMaterial color="#38bdf8" />
+                </mesh>
+            ))}
+
+            {/* Ascending Energy Wave Rings */}
+            <mesh ref={waveRing1} position={[0, 20, 0]} rotation={[Math.PI/2, 0, 0]}>
+                <torusGeometry args={[3.2, 0.12, 8, 24]} />
+                <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} />
+            </mesh>
+            <mesh ref={waveRing2} position={[0, 35, 0]} rotation={[Math.PI/2, 0, 0]}>
+                <torusGeometry args={[3.2, 0.12, 8, 24]} />
+                <meshBasicMaterial color="#67e8f9" transparent opacity={0.6} />
+            </mesh>
+
+            {/* Upper Slender Spire Mast */}
+            <mesh position={[0, 48, 0]} castShadow receiveShadow>
+                <cylinderGeometry args={[0.8, 2.0, 36, 8]} />
+                <meshStandardMaterial 
+                    color="#f1f5f9" 
+                    metalness={0.6} 
+                    roughness={0.2} 
+                />
+            </mesh>
+
+            {/* Kinetic Energy Chamber at Height Y=36 */}
+            <group position={[0, 36, 0]}>
+                {/* 1. Pulsating Plasma Energy Core */}
+                <mesh ref={coreRef}>
+                    <icosahedronGeometry args={[2.2, 2]} />
+                    <meshBasicMaterial color="#38bdf8" toneMapped={false} />
+                </mesh>
+                <mesh>
+                    <sphereGeometry args={[1.5, 16, 16]} />
+                    <meshBasicMaterial color="#ffffff" toneMapped={false} />
+                </mesh>
+
+                {/* 2. Concentric Kinetic Gyro Rings */}
+                <group ref={ring1Ref}>
+                    <mesh>
+                        <torusGeometry args={[4.2, 0.18, 8, 32]} />
+                        <meshStandardMaterial 
+                            color="#e2e8f0" 
+                            metalness={0.9} 
+                            roughness={0.1} 
+                            emissive="#38bdf8" 
+                            emissiveIntensity={0.8 + nightFactor * 1.5}
+                        />
+                    </mesh>
+                </group>
+                <group ref={ring2Ref}>
+                    <mesh>
+                        <torusGeometry args={[5.2, 0.18, 8, 32]} />
+                        <meshStandardMaterial 
+                            color="#cbd5e1" 
+                            metalness={0.9} 
+                            roughness={0.1} 
+                            emissive="#0284c7" 
+                            emissiveIntensity={0.8 + nightFactor * 1.5}
+                        />
+                    </mesh>
+                </group>
+                <group ref={ring3Ref}>
+                    <mesh>
+                        <torusGeometry args={[6.2, 0.18, 8, 32]} />
+                        <meshStandardMaterial 
+                            color="#94a3b8" 
+                            metalness={0.9} 
+                            roughness={0.1} 
+                            emissive="#f59e0b" 
+                            emissiveIntensity={0.7 + nightFactor * 1.5}
+                        />
+                    </mesh>
+                </group>
+
+                {/* 3. Translucent Quantum Forcefield */}
+                <mesh ref={shieldRef}>
+                    <icosahedronGeometry args={[7.2, 1]} />
+                    <meshPhysicalMaterial 
+                        color="#38bdf8" 
+                        wireframe 
+                        transparent 
+                        opacity={0.35 + nightFactor * 0.3} 
+                        emissive="#38bdf8" 
+                        emissiveIntensity={0.5} 
+                    />
+                </mesh>
+            </group>
+
+            {/* Apex Crown & Luminescent Beacon at Height Y=68 */}
+            <group position={[0, 68, 0]}>
+                {/* Crown Solar Collector Fins */}
+                {[0, 1, 2, 3].map((idx) => (
+                    <mesh key={idx} rotation={[0, idx * Math.PI / 2, 0.18]} position={[Math.cos(idx*Math.PI/2)*0.8, 0, Math.sin(idx*Math.PI/2)*0.8]}>
+                        <boxGeometry args={[0.1, 4.5, 0.8]} />
+                        <meshStandardMaterial color="#38bdf8" emissive="#38bdf8" emissiveIntensity={1.2} />
+                    </mesh>
+                ))}
+                {/* Glowing Apex Beacon Gem */}
+                <mesh position={[0, 3.2, 0]}>
+                    <octahedronGeometry args={[1.5, 0]} />
+                    <meshBasicMaterial color={nightFactor > 0.4 ? "#38bdf8" : "#f59e0b"} toneMapped={false} />
+                </mesh>
+                {/* Soft Point Light radiating on rooftops */}
+                <pointLight 
+                    position={[0, 3.2, 0]} 
+                    color={nightFactor > 0.4 ? "#38bdf8" : "#fbbf24"} 
+                    intensity={2.5 + nightFactor * 3.5} 
+                    distance={180} 
+                    decay={2} 
+                />
+            </group>
+        </group>
+    );
+};
+
+// Energy Streams with Dynamic Photon Packet Particles sliding on Bezier curves
+const EnergyStreams = ({ 
+    stations, 
+    target, 
+    speedMultiplier, 
+    color 
+}: { 
+    stations: EnergyStation[], 
+    target: THREE.Vector3, 
+    speedMultiplier: number, 
+    color: string 
+}) => {
     const shaderRef = useRef<THREE.ShaderMaterial>(null);
+    const particleGroup = useRef<THREE.Group>(null);
     
     const curves = useMemo(() => {
         return stations.map(s => {
             const p1 = new THREE.Vector3(...s.position).add(new THREE.Vector3(0, s.type === 'WIND' ? 18 : 2, 0));
-            const p3 = target;
+            const p3 = target.clone().add(new THREE.Vector3(0, 20, 0));
             const mid = p1.clone().lerp(p3, 0.5);
-            mid.y += 30 + Math.random() * 20; 
+            mid.y += 32 + Math.random() * 15; 
             return new THREE.QuadraticBezierCurve3(p1, mid, p3);
         });
     }, [stations.length, target]);
@@ -868,10 +1183,35 @@ const EnergyStreams = ({ stations, target, speedMultiplier, color }: { stations:
     }, [color]);
 
     useFrame((state) => {
+        const time = state.clock.elapsedTime;
         if (shaderRef.current) {
-            shaderRef.current.uniforms.time.value = state.clock.elapsedTime;
-            shaderRef.current.uniforms.speed.value = 0.3 + (speedMultiplier * 2.5);
-            shaderRef.current.uniforms.opacity.value = 0.4 + (speedMultiplier * 0.6);
+            shaderRef.current.uniforms.time.value = time;
+            shaderRef.current.uniforms.speed.value = 0.4 + (speedMultiplier * 2.8);
+            shaderRef.current.uniforms.opacity.value = 0.5 + (speedMultiplier * 0.5);
+        }
+
+        // Update Photon Packets along each Bezier curve
+        if (particleGroup.current) {
+            const children = particleGroup.current.children;
+            let childIdx = 0;
+            const speed = 0.25 + speedMultiplier * 0.75;
+
+            curves.forEach((curve) => {
+                // 3 packets per stream
+                for (let p = 0; p < 3; p++) {
+                    if (childIdx < children.length) {
+                        const mesh = children[childIdx] as THREE.Mesh;
+                        const t = ((time * speed + p * 0.33) % 1.0);
+                        const pos = curve.getPointAt(t);
+                        mesh.position.copy(pos);
+                        
+                        // Scale pulses as it approaches center
+                        const sc = 0.5 + Math.sin(t * Math.PI) * 0.6;
+                        mesh.scale.set(sc, sc, sc);
+                        childIdx++;
+                    }
+                }
+            });
         }
     });
 
@@ -882,15 +1222,36 @@ const EnergyStreams = ({ stations, target, speedMultiplier, color }: { stations:
 
     return (
         <group>
+            {/* Stream Tubes */}
             {curves.map((curve, i) => (
                 <mesh key={i}>
-                    <tubeGeometry args={[curve, 40, 0.25, 6, false]} />
+                    <tubeGeometry args={[curve, 48, 0.28, 8, false]} />
                     <primitive object={mat} attach="material" />
                 </mesh>
             ))}
+
+            {/* Photon Energy Packets */}
+            <group ref={particleGroup}>
+                {curves.map((_, curveIdx) => (
+                    <React.Fragment key={curveIdx}>
+                        <mesh>
+                            <sphereGeometry args={[0.6, 8, 8]} />
+                            <meshBasicMaterial color={color} toneMapped={false} />
+                        </mesh>
+                        <mesh>
+                            <sphereGeometry args={[0.6, 8, 8]} />
+                            <meshBasicMaterial color="#ffffff" toneMapped={false} />
+                        </mesh>
+                        <mesh>
+                            <sphereGeometry args={[0.6, 8, 8]} />
+                            <meshBasicMaterial color={color} toneMapped={false} />
+                        </mesh>
+                    </React.Fragment>
+                ))}
+            </group>
         </group>
-    )
-}
+    );
+};
 
 const PlacementCursor = ({ active, tool }: { active: boolean, tool: EditorTool }) => {
     const ref = useRef<THREE.Group>(null);
@@ -921,7 +1282,6 @@ const PlacementCursor = ({ active, tool }: { active: boolean, tool: EditorTool }
 
     if (!active || tool === 'SELECT' || tool === 'REMOVE') return null;
 
-    // Ghost visual based on tool
     let ghost = null;
     const isUrban = ['ADD_RESIDENTIAL', 'ADD_COMMERCIAL', 'ADD_PARK', 'ADD_ROAD', 'ADD_FOREST', 'ADD_MOUNTAIN'].includes(tool);
 
@@ -951,43 +1311,110 @@ const PlacementCursor = ({ active, tool }: { active: boolean, tool: EditorTool }
             )}
         </group>
     )
-}
+};
 
 // --- Main Scene ---
+
+// Preset Camera Coordinates for Cinematic Director
+const CAMERA_PRESETS: Record<CameraPreset, { pos: THREE.Vector3; target: THREE.Vector3 }> = {
+  OVERVIEW: { pos: new THREE.Vector3(-110, 85, 110), target: new THREE.Vector3(0, 15, 0) },
+  SPIRE: { pos: new THREE.Vector3(-28, 44, 28), target: new THREE.Vector3(0, 36, 0) },
+  WIND_RIDGE: { pos: new THREE.Vector3(115, 36, -85), target: new THREE.Vector3(50, 15, -45) },
+  SKYLINE: { pos: new THREE.Vector3(-55, 16, -45), target: new THREE.Vector3(0, 12, 0) },
+  ECO_LAKE: { pos: new THREE.Vector3(130, 40, 70), target: new THREE.Vector3(75, 4, 25) },
+};
 
 const SceneContent = ({ 
     gestureState, 
     appMode, 
     sceneData, 
     editorTool, 
-    onStationUpdate,
-    onBuildingUpdate,
-    envSettings
+    onStationUpdate, 
+    onBuildingUpdate, 
+    envSettings,
+    cameraPreset,
+    autoRotate,
 }: { 
     gestureState: React.MutableRefObject<GestureState>, 
     appMode: AppMode, 
-    sceneData: SceneData,
-    editorTool: EditorTool,
-    onStationUpdate: (s: EnergyStation[]) => void,
-    onBuildingUpdate: (b: BuildingData[]) => void,
-    envSettings: { windSpeed: number, sunPos: number, cloudCover: number }
+    sceneData: SceneData, 
+    editorTool: EditorTool, 
+    onStationUpdate: (s: EnergyStation[]) => void, 
+    onBuildingUpdate: (b: BuildingData[]) => void, 
+    envSettings: { windSpeed: number, sunPos: number, cloudCover: number },
+    cameraPreset: CameraPreset,
+    autoRotate: boolean,
 }) => {
   const dirLight = useRef<THREE.DirectionalLight>(null);
+  const hemiLight = useRef<THREE.HemisphereLight>(null);
+  const ambLight = useRef<THREE.AmbientLight>(null);
   const controlsRef = useRef<OrbitControlsImpl>(null);
+
+  const isTransitioningRef = useRef(false);
+  const targetCamPos = useRef(new THREE.Vector3(-110, 85, 110));
+  const targetCamTarget = useRef(new THREE.Vector3(0, 15, 0));
+
+  useEffect(() => {
+    const config = CAMERA_PRESETS[cameraPreset];
+    if (config) {
+      targetCamPos.current.copy(config.pos);
+      targetCamTarget.current.copy(config.target);
+      isTransitioningRef.current = true;
+    }
+  }, [cameraPreset]);
   
   const [solarPulse, setSolarPulse] = useState(0);
   const [windPulse, setWindPulse] = useState(0);
+  const [nightFactor, setNightFactor] = useState(0);
+  const [duskFactor, setDuskFactor] = useState(0);
+  const [fogColor, setFogColor] = useState(COLORS.fog);
+
   const sunTarget = useRef(new THREE.Vector3(100, 150, 50));
+  const sunPosVec = useRef(new THREE.Vector3(100, 150, 50));
+
+  // Color caches for lighting transitions
+  const daySunCol = useMemo(() => new THREE.Color('#fffdf5'), []);
+  const sunsetSunCol = useMemo(() => new THREE.Color('#f97316'), []);
+  const nightMoonCol = useMemo(() => new THREE.Color('#93c5fd'), []);
+
+  const dayHemiSky = useMemo(() => new THREE.Color('#bae6fd'), []);
+  const sunsetHemiSky = useMemo(() => new THREE.Color('#fdba74'), []);
+  const nightHemiSky = useMemo(() => new THREE.Color('#1e1b4b'), []);
+
+  const dayHemiGround = useMemo(() => new THREE.Color('#334155'), []);
+  const sunsetHemiGround = useMemo(() => new THREE.Color('#451a03'), []);
+  const nightHemiGround = useMemo(() => new THREE.Color('#020617'), []);
+
+  const dayFogCol = useMemo(() => new THREE.Color('#cbd5e1'), []);
+  const sunsetFogCol = useMemo(() => new THREE.Color('#9a3412'), []);
+  const nightFogCol = useMemo(() => new THREE.Color('#020617'), []);
+
+  const currentSunCol = useRef(new THREE.Color());
+  const currentSkyHemi = useRef(new THREE.Color());
+  const currentGroundHemi = useRef(new THREE.Color());
+  const currentFogCol = useRef(new THREE.Color());
 
   useFrame((state, delta) => {
-    // Shared Logic
     const time = state.clock.getElapsedTime();
+
+    // Smooth Camera Transition toward active preset
+    if (isTransitioningRef.current) {
+      state.camera.position.lerp(targetCamPos.current, delta * 3.5);
+      if (controlsRef.current) {
+        controlsRef.current.target.lerp(targetCamTarget.current, delta * 3.5);
+        controlsRef.current.update();
+      }
+      if (state.camera.position.distanceTo(targetCamPos.current) < 0.5) {
+        isTransitioningRef.current = false;
+      }
+    }
 
     if (appMode === 'EXPERIENCE') {
         const gs = gestureState.current;
         
-        // Joystick
+        // Joystick Orbit control
         if (gs.joystick.active && controlsRef.current) {
+            isTransitioningRef.current = false;
             const rotateSpeed = 2.0 * delta;
             controlsRef.current.setAzimuthalAngle(controlsRef.current.getAzimuthalAngle() + gs.joystick.deltaX * rotateSpeed);
             const polarSpeed = 1.5 * delta;
@@ -996,17 +1423,26 @@ const SceneContent = ({
             controlsRef.current.setPolarAngle(newPolar);
             controlsRef.current.update();
         } else if (controlsRef.current) {
-            controlsRef.current.autoRotate = true;
+            controlsRef.current.autoRotate = autoRotate;
         }
 
-        // Helios
+        // Helios Sun Positioning
         if (gs.helios.active) {
             const angle = gs.helios.x * Math.PI * 2;
-            const radius = 180;
-            const elevation = Math.max(0.1, gs.helios.y) * Math.PI / 2;
-            sunTarget.current.set(Math.cos(angle) * Math.cos(elevation) * radius, Math.sin(elevation) * radius, Math.sin(angle) * Math.cos(elevation) * radius);
+            const radius = 220;
+            const elevation = (gs.helios.y - 0.2) * Math.PI / 1.6;
+            sunTarget.current.set(
+                Math.cos(angle) * Math.cos(elevation) * radius,
+                Math.sin(elevation) * radius,
+                Math.sin(angle) * Math.cos(elevation) * radius
+            );
         } else {
-            sunTarget.current.set(100, Math.sin(Math.PI * (0.2 + Math.sin(time*0.1) * 0.2)) * 150, Math.cos(Math.PI * (0.2 + Math.sin(time*0.1) * 0.2)) * 150);
+            const tAngle = time * 0.06;
+            sunTarget.current.set(
+                Math.cos(tAngle) * 180,
+                Math.sin(Math.PI * (0.28 + Math.sin(time * 0.08) * 0.24)) * 170,
+                Math.sin(tAngle) * 180
+            );
         }
 
         // Pulse
@@ -1016,27 +1452,85 @@ const SceneContent = ({
         setWindPulse(THREE.MathUtils.lerp(windPulse, targetWind, delta * 4));
 
     } else {
-        // Planner
-        if (controlsRef.current) controlsRef.current.autoRotate = false;
+        // Planner Mode: Solar Arc synced with sunPos slider
+        if (controlsRef.current) controlsRef.current.autoRotate = autoRotate;
         
-        const angle = -Math.PI/2 + (envSettings.sunPos * Math.PI); 
-        const radius = 200;
-        sunTarget.current.set(Math.sin(angle)*radius, Math.abs(Math.cos(angle))*radius, 50);
+        // Solar azimuth: sweeps from East (-70 deg) to West (+70 deg)
+        const azAngle = (envSettings.sunPos - 0.5) * Math.PI * 0.75;
+        // Sun elevation: rises at 0.0, peaks at 0.5, sets at 1.0, dips slightly negative at endpoints for twilight
+        const elevAngle = Math.sin(envSettings.sunPos * Math.PI);
+        const radius = 220;
+        
+        const sx = Math.sin(azAngle) * radius;
+        const sy = (elevAngle * 190) - ((envSettings.sunPos > 0.94 || envSettings.sunPos < 0.06) ? 20 : 0);
+        const sz = Math.cos(azAngle) * (radius * 0.55);
+        
+        sunTarget.current.set(sx, sy, sz);
 
         setWindPulse(THREE.MathUtils.lerp(windPulse, envSettings.windSpeed, delta * 2));
         
-        // Solar Pulse depends on Sun Pos AND Cloud Cover in Planner Mode
         const sunFactor = Math.max(0, Math.sin(envSettings.sunPos * Math.PI));
-        const cloudFactor = 1 - (envSettings.cloudCover * 0.8); // Clouds dampen signal
+        const cloudFactor = 1 - (envSettings.cloudCover * 0.8);
         setSolarPulse(THREE.MathUtils.lerp(solarPulse, sunFactor * cloudFactor * 0.5, delta * 2));
     }
     
+    // Smoothly track sun position
+    sunPosVec.current.lerp(sunTarget.current, delta * 2.5);
+
+    // Calculate Day, Dusk, and Night transitions
+    const sunElevRatio = Math.max(-0.25, sunPosVec.current.y / 180);
+    const targetNight = THREE.MathUtils.clamp((0.18 - sunElevRatio) / 0.28, 0, 1);
+    const targetDusk = THREE.MathUtils.clamp(1.0 - Math.abs(sunElevRatio - 0.12) * 5.5, 0, 1);
+
+    const newNight = THREE.MathUtils.lerp(nightFactor, targetNight, delta * 3.5);
+    const newDusk = THREE.MathUtils.lerp(duskFactor, targetDusk, delta * 3.5);
+    setNightFactor(newNight);
+    setDuskFactor(newDusk);
+
+    // Dynamic Light Colors & Intensities
     if (dirLight.current) {
-        dirLight.current.position.lerp(sunTarget.current, delta * 2.0);
-        // Dim light if cloudy
-        const intensity = 2.0 * (1 - envSettings.cloudCover * 0.6);
-        dirLight.current.intensity = THREE.MathUtils.lerp(dirLight.current.intensity, intensity, delta);
+        dirLight.current.position.copy(sunPosVec.current);
+        
+        // Sun color blend: Day -> Sunset -> Moonlight
+        currentSunCol.current.copy(daySunCol).lerp(sunsetSunCol, newDusk * (1 - newNight * 0.8));
+        currentSunCol.current.lerp(nightMoonCol, newNight);
+        dirLight.current.color.copy(currentSunCol.current);
+
+        // Intensity: Bright warm sun at noon -> soft amber at sunset -> cool dim moonlight at night
+        const dayIntensity = 2.4 * (1 - envSettings.cloudCover * 0.5);
+        const duskIntensity = 1.8 * (1 - envSettings.cloudCover * 0.4);
+        const nightIntensity = 0.45 * (1 - envSettings.cloudCover * 0.3);
+
+        const targetIntensity = THREE.MathUtils.lerp(
+            THREE.MathUtils.lerp(dayIntensity, duskIntensity, newDusk),
+            nightIntensity,
+            newNight
+        );
+        dirLight.current.intensity = THREE.MathUtils.lerp(dirLight.current.intensity, targetIntensity, delta * 3);
     }
+
+    if (hemiLight.current) {
+        currentSkyHemi.current.copy(dayHemiSky).lerp(sunsetHemiSky, newDusk);
+        currentSkyHemi.current.lerp(nightHemiSky, newNight);
+        hemiLight.current.color.copy(currentSkyHemi.current);
+
+        currentGroundHemi.current.copy(dayHemiGround).lerp(sunsetHemiGround, newDusk);
+        currentGroundHemi.current.lerp(nightHemiGround, newNight);
+        hemiLight.current.groundColor.copy(currentGroundHemi.current);
+
+        const hemiTargetIntensity = THREE.MathUtils.lerp(0.65, 0.25, newNight);
+        hemiLight.current.intensity = THREE.MathUtils.lerp(hemiLight.current.intensity, hemiTargetIntensity, delta * 3);
+    }
+
+    if (ambLight.current) {
+        const ambTarget = THREE.MathUtils.lerp(0.35, 0.18, newNight);
+        ambLight.current.intensity = THREE.MathUtils.lerp(ambLight.current.intensity, ambTarget, delta * 3);
+    }
+
+    // Dynamic Fog calculation
+    currentFogCol.current.copy(dayFogCol).lerp(sunsetFogCol, newDusk);
+    currentFogCol.current.lerp(nightFogCol, newNight);
+    setFogColor(`#${currentFogCol.current.getHexString()}`);
   });
 
   const handleTerrainClick = (point: THREE.Vector3) => {
@@ -1060,9 +1554,8 @@ const SceneContent = ({
         return;
     }
 
-    // Urban Placement
-    // Snap to grid for buildings
-    const sx = Math.round(point.x / 12) * 12; // 12 unit spacing matches generated city
+    // Urban Placement: Snap to 12 unit grid
+    const sx = Math.round(point.x / 12) * 12;
     const sz = Math.round(point.z / 12) * 12;
     const sy = getTerrainHeight(sx, sz);
 
@@ -1075,11 +1568,10 @@ const SceneContent = ({
     else if (editorTool === 'ADD_FOREST') { type = BuildingType.Forest; scale = [10, 1, 10]; }
     else if (editorTool === 'ADD_MOUNTAIN') { type = BuildingType.Mountain; scale = [12, 18, 12]; }
 
-    // Remove existing building at same spot to prevent overlap
     const filtered = sceneData.city.buildings.filter(b => {
         const dx = b.position[0] - sx;
         const dz = b.position[2] - sz;
-        return Math.sqrt(dx*dx + dz*dz) > 4; // Check close proximity
+        return Math.sqrt(dx*dx + dz*dz) > 4;
     });
 
     const newBuilding: BuildingData = {
@@ -1108,21 +1600,71 @@ const SceneContent = ({
   const windStations = useMemo(() => sceneData.stations.filter(s => s.type === 'WIND'), [sceneData.stations]);
   const solarStations = useMemo(() => sceneData.stations.filter(s => s.type === 'SOLAR'), [sceneData.stations]);
 
+  // Atmospheric parameters for Drei Sky
+  const skyTurbidity = 6.0 + duskFactor * 14.0 + nightFactor * 8.0;
+  const skyRayleigh = 0.4 + duskFactor * 3.6 + nightFactor * 0.2;
+  const skyMieCoeff = 0.005 + duskFactor * 0.035;
+
   return (
     <>
-      <fog attach="fog" args={[COLORS.fog, 80, 400]} />
-      <ambientLight intensity={0.4} color="#e0f2fe" />
+      <fog attach="fog" args={[fogColor, 90, 480]} />
+      
+      {/* Soft Outdoor Ambient & Hemisphere Bounce Lighting */}
+      <ambientLight ref={ambLight} intensity={0.3} color="#e0f2fe" />
+      <hemisphereLight 
+        ref={hemiLight}
+        skyColor="#bae6fd"
+        groundColor="#334155"
+        intensity={0.65}
+      />
+      
+      {/* Dynamic Key Sun / Moon Directional Light with Tuned Soft Shadows */}
       <directionalLight 
         ref={dirLight}
-        intensity={2.0} 
+        intensity={2.2} 
         color="#fffbeb"
         castShadow 
         shadow-mapSize={[2048, 2048]}
+        shadow-bias={-0.00015}
+        shadow-normalBias={0.025}
       >
-        <orthographicCamera attach="shadow-camera" args={[-150, 150, 150, -150]} />
+        <orthographicCamera attach="shadow-camera" args={[-170, 170, 170, -170, 10, 550]} />
       </directionalLight>
 
+      {/* Dynamic Procedural Sky & Night Starfield */}
+      <Sky 
+        distance={1200}
+        sunPosition={[
+            sunPosVec.current.x, 
+            Math.max(sunPosVec.current.y, 2), 
+            sunPosVec.current.z
+        ]}
+        turbidity={skyTurbidity}
+        rayleigh={skyRayleigh}
+        mieCoefficient={skyMieCoeff}
+        mieDirectionalG={0.82}
+      />
+
+      {nightFactor > 0.1 && (
+        <Stars 
+            radius={280} 
+            depth={60} 
+            count={3500} 
+            factor={4.5} 
+            saturation={0} 
+            fade 
+            speed={1.2} 
+        />
+      )}
+
+      {/* Diorama Island Cliff Base */}
+      <DioramaBase nightFactor={nightFactor} />
+
+      {/* Main Terrain */}
       <Terrain editorMode={appMode === 'PLANNER'} onPlace={handleTerrainClick} />
+
+      {/* Animated Water Basin & Wetland Lily Filters */}
+      <WaterBasin nightFactor={nightFactor} />
       
       {/* City Buildings */}
       <group>
@@ -1130,14 +1672,12 @@ const SceneContent = ({
              <CityBuilding 
                 key={b.id} 
                 {...b} 
+                nightFactor={nightFactor}
                 onClick={(e) => handleObjectClick(e, b.id, 'BUILDING')}
              />
         ))}
-         {/* Central Hub */}
-         <mesh position={[0, 35, 0]} castShadow>
-            <cylinderGeometry args={[1, 2.5, 80, 8]} />
-            <meshStandardMaterial color="#ffffff" emissive="#e0f2fe" emissiveIntensity={0.6} />
-        </mesh>
+         {/* Central Solarpunk Energy Spire */}
+         <CentralSpire nightFactor={nightFactor} />
       </group>
       
       {/* Stations */}
@@ -1150,7 +1690,13 @@ const SceneContent = ({
           
           <Instances range={solarStations.length} castShadow receiveShadow>
             <boxGeometry args={[3, 0.15, 4]} />
-            <meshPhysicalMaterial color="#0f172a" roughness={0.15} metalness={0.85} emissive={COLORS.solar} emissiveIntensity={0.15} />
+            <meshPhysicalMaterial 
+                color="#0f172a" 
+                roughness={0.15} 
+                metalness={0.85} 
+                emissive={COLORS.solar} 
+                emissiveIntensity={0.15 + nightFactor * 0.4} 
+            />
             {solarStations.map(s => (
                 <group key={s.id} onClick={(e) => handleObjectClick(e, s.id, 'STATION')}>
                      <Instance position={s.position} rotation={s.rotation} />
@@ -1159,22 +1705,25 @@ const SceneContent = ({
           </Instances>
       </group>
 
+      {/* Autonomous Ground & Aerial Transit Network */}
+      <TransitNetwork buildings={sceneData.city.buildings} nightFactor={nightFactor} />
+
       <EnergyStreams stations={windStations} target={sceneData.city.target} speedMultiplier={windPulse} color={COLORS.windGlow} />
       <EnergyStreams stations={solarStations} target={sceneData.city.target} speedMultiplier={solarPulse} color={COLORS.solarGlow} />
 
       <PlacementCursor active={appMode === 'PLANNER'} tool={editorTool} />
-
-      <Environment preset="city" blur={1} background />
-      <BakeShadows />
       
       <OrbitControls 
         ref={controlsRef}
-        autoRotate={true}
+        autoRotate={autoRotate}
         autoRotateSpeed={0.5} 
-        minDistance={40}
-        maxDistance={350}
+        minDistance={30}
+        maxDistance={380}
         enableDamping
-        enabled={true} 
+        enabled={true}
+        onStart={() => {
+          isTransitioningRef.current = false;
+        }}
       />
     </>
   );
@@ -1184,6 +1733,8 @@ const IsoMap = ({ appMode }: { appMode: AppMode }) => {
   const [sceneData, setSceneData] = useState<SceneData>(() => generateInitialData());
   const [editorTool, setEditorTool] = useState<EditorTool>('SELECT');
   const [envSettings, setEnvSettings] = useState({ windSpeed: 0.5, sunPos: 0.5, cloudCover: 0.1 });
+  const [cameraPreset, setCameraPreset] = useState<CameraPreset>('OVERVIEW');
+  const [autoRotate, setAutoRotate] = useState<boolean>(true);
   
   // Computational Design Engine: Calculate Metrics
   const metrics = useMemo<SimulationMetrics>(() => {
@@ -1201,7 +1752,6 @@ const IsoMap = ({ appMode }: { appMode: AppMode }) => {
             cost += SIM_CONFIG.COST_TURBINE;
         } else {
             const sunFactor = Math.max(0, Math.sin(envSettings.sunPos * Math.PI));
-            // New: Cloud cover reduces solar efficiency
             const weatherFactor = 1 - (envSettings.cloudCover * 0.9);
             const power = SIM_CONFIG.BASE_SOLAR_OUTPUT * s.efficiency * sunFactor * weatherFactor;
             solarOut += power;
@@ -1243,8 +1793,20 @@ const IsoMap = ({ appMode }: { appMode: AppMode }) => {
 
   return (
     <div className="w-full h-full relative">
+      {/* Floating Cinematic Camera Director Dock */}
+      <div className="absolute top-6 left-6 z-40">
+        <CameraDock
+          currentPreset={cameraPreset}
+          onSelectPreset={(p) => {
+            setCameraPreset(p);
+          }}
+          autoRotate={autoRotate}
+          onToggleAutoRotate={() => setAutoRotate((prev) => !prev)}
+        />
+      </div>
+
       <Canvas shadows dpr={[1, 1.5]} gl={{ antialias: false, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}>
-        <PerspectiveCamera makeDefault position={[-100, 80, 100]} fov={35} />
+        <PerspectiveCamera makeDefault position={[-110, 85, 110]} fov={35} />
         
         <SceneContent 
             appMode={appMode}
@@ -1254,6 +1816,8 @@ const IsoMap = ({ appMode }: { appMode: AppMode }) => {
             onStationUpdate={(stations) => setSceneData(prev => ({ ...prev, stations }))}
             onBuildingUpdate={(buildings) => setSceneData(prev => ({ ...prev, city: { ...prev.city, buildings } }))}
             envSettings={envSettings}
+            cameraPreset={cameraPreset}
+            autoRotate={autoRotate}
         />
 
         <EffectComposer disableNormalPass>

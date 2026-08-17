@@ -222,8 +222,10 @@ export const PlannerUI = ({ activeTool, onToolChange, metrics, envSettings, onEn
 
                         <div>
                              <div className="flex justify-between items-end mb-2">
-                                <span className="text-[10px] font-bold text-slate-400 uppercase">Solar Angle</span>
-                                <span className="font-mono text-amber-400 text-xs">{Math.floor(envSettings.sunPos * 12 + 6)}:00</span>
+                                <span className="text-[10px] font-bold text-slate-400 uppercase">Solar Angle / Time</span>
+                                <span className="font-mono text-amber-400 text-xs">
+                                    {envSettings.sunPos >= 0.98 ? 'Night (00:00)' : `${Math.floor(envSettings.sunPos * 12 + 6)}:${Math.floor(((envSettings.sunPos * 12 + 6) % 1) * 60).toString().padStart(2, '0')}`}
+                                </span>
                              </div>
                              <input 
                                 type="range" min="0" max="1" step="0.01"
@@ -231,6 +233,26 @@ export const PlannerUI = ({ activeTool, onToolChange, metrics, envSettings, onEn
                                 onChange={(e) => onEnvChange('sunPos', parseFloat(e.target.value))}
                                 className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
                              />
+                             <div className="grid grid-cols-4 gap-1 mt-2">
+                                {[
+                                    { label: 'Dawn', val: 0.05 },
+                                    { label: 'Noon', val: 0.5 },
+                                    { label: 'Dusk', val: 0.92 },
+                                    { label: 'Night', val: 1.0 }
+                                ].map((preset) => (
+                                    <button
+                                        key={preset.label}
+                                        onClick={() => onEnvChange('sunPos', preset.val)}
+                                        className={`px-1.5 py-1 text-[9px] font-bold rounded transition-colors ${
+                                            Math.abs(envSettings.sunPos - preset.val) < 0.08
+                                                ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50'
+                                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200'
+                                        }`}
+                                    >
+                                        {preset.label}
+                                    </button>
+                                ))}
+                             </div>
                         </div>
 
                         <div>
